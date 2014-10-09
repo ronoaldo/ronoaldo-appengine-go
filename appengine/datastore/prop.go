@@ -30,9 +30,11 @@ type Property struct {
 	//	- bool
 	//	- string
 	//	- float64
+	//	- ByteString
 	//	- *Key
 	//	- time.Time
 	//	- appengine.BlobKey
+	//	- appengine.GeoPoint
 	//	- []byte (up to 1 megabyte in length)
 	// This set is smaller than the set of valid struct field types that the
 	// datastore can load and save. A Property Value cannot be a slice (apart
@@ -60,6 +62,9 @@ type Property struct {
 	// it as a field of type []T instead of type T.
 	Multiple bool
 }
+
+// ByteString is a short byte slice (up to 500 bytes) that can be indexed.
+type ByteString []byte
 
 // PropertyLoadSaver can be converted from and to a sequence of Properties.
 // Load should drain the channel until closed, even if an error occurred.
@@ -217,7 +222,7 @@ func getStructCodecLocked(t reflect.Type) (ret *structCodec, retErr error) {
 			c.hasSlice = c.hasSlice || fIsSlice
 		}
 
-		if substructType != nil && substructType != typeOfTime {
+		if substructType != nil && substructType != typeOfTime && substructType != typeOfGeoPoint {
 			if name != "" {
 				name = name + "."
 			}

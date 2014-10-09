@@ -47,6 +47,8 @@ type Package struct {
 	HasInit      bool       // whether the package has any init functions
 	HasMain      bool       // whether the file has internal.Main
 	Dupe         bool       // whether the package is a duplicate
+
+	compiled chan struct{} // closed when the package has finished compiling
 }
 
 func (p *Package) String() string {
@@ -106,7 +108,9 @@ func (v vfs) readDir(dir string) (fis []os.FileInfo, err error) {
 func ParseFiles(baseDir string, filenames []string) (*App, error) {
 	app := &App{
 		PackageIndex: make(map[string]*Package),
-		InternalPkg:  *internalPkg,
+	}
+	if !*vm {
+		app.InternalPkg = "appengine_internal"
 	}
 	pkgFiles := make(map[string][]*File) // app package name => its files
 
@@ -135,6 +139,9 @@ func ParseFiles(baseDir string, filenames []string) (*App, error) {
 		ReadDir: func(dir string) ([]os.FileInfo, error) {
 			return vfs.readDir(dir)
 		},
+	}
+	if *vm {
+		ctxt.BuildTags = append(ctxt.BuildTags, "appenginevm")
 	}
 
 	dirs := make(map[string]bool)
@@ -204,7 +211,7 @@ func ParseFiles(baseDir string, filenames []string) (*App, error) {
 			}
 		}
 		app.Packages = append(app.Packages, p)
-		if p.HasInit || *useAllPackages {
+		if p.HasInit || *vm {
 			app.RootPackages = append(app.RootPackages, p)
 		}
 		app.PackageIndex[p.ImportPath] = p
@@ -333,7 +340,7 @@ func addFromGOPATH(app *App, noBuild *regexp.Regexp, appFilesInGOPATH map[string
 						continue
 					}
 					hasMain := false
-					if *internalPkg == "" && pkg.Name == "internal" {
+					if *vm && pkg.Name == "internal" {
 						// See if this file has internal.Main.
 						// This check duplicates conditions in readFile
 						// as an optimisation to avoid parsing lots of code
@@ -401,7 +408,7 @@ func readFile(baseDir, filename string) (file *ast.File, fset *token.FileSet, ha
 	}
 	fset = token.NewFileSet()
 	file, err = parser.ParseFile(fset, fullName, src, 0)
-	if *internalPkg == "" && file.Name.Name == "internal" {
+	if *vm && file.Name.Name == "internal" {
 		for _, decl := range file.Decls {
 			funcDecl, ok := decl.(*ast.FuncDecl)
 			if !ok {
@@ -486,7 +493,8 @@ func checkImport(path string) bool {
 		return false
 	}
 	if path == "syscall" || path == "unsafe" {
-		return false
+		// VM apps may import "syscall" and "unsafe"
+		return *vm
 	}
 	return true
 }
@@ -566,7 +574,11 @@ func (c *compLitChecker) Visit(node ast.Node) ast.Visitor {
 }
 
 // Cache of standard package status.
-var stdPackageCache = make(map[string]bool)
+var stdPackageCache = map[string]bool{
+	// There's no unsafe.a, but "unsafe" is a standard package.
+	// Mention it explicitly here so we avoid a useless warning.
+	"unsafe": true,
+}
 
 // isStandardPackage reports whether import path s is a standard package.
 func isStandardPackage(s string) bool {
@@ -595,10 +607,14 @@ func isStandardPackage(s string) bool {
 
 // gopathPackage imports information about a package in GOPATH.
 func gopathPackage(s string) (*build.Package, error) {
+	tags := []string{"appengine"}
+	if *vm {
+		tags = append(tags, "appenginevm")
+	}
 	ctxt := build.Default
 	ctxt.GOROOT = *goRoot
 	ctxt.GOPATH = *goPath
-	ctxt.BuildTags = append([]string{"appengine"}, ctxt.BuildTags...) // don't affect build.Default
+	ctxt.BuildTags = append(tags, ctxt.BuildTags...) // don't affect build.Default
 	ctxt.Compiler = "gc"
 	// Don't use FindOnly or AllowBinary because we want import information
 	// and we require the source files.
