@@ -12,11 +12,12 @@ pointers, and the valid types for a struct's fields are:
   - search.Atom,
   - search.HTML,
   - time.Time (stored with millisecond precision),
-  - float64,
+  - float64 (value between -2,147,483,647 and 2,147,483,647 inclusive),
   - appengine.GeoPoint.
 
 Documents can also be represented by any type implementing the FieldLoadSaver
-interface.
+or FieldMetadataLoadSaver interface. The FieldMetadataLoadSaver allows
+metadata to be set for the document with the DocumentMetadata type.
 
 Example code:
 
@@ -80,7 +81,7 @@ to Get to hold the resulting document.
 
 Queries are expressed as strings, plus some optional parameters. The query
 language is described at
-https://developers.google.com/appengine/docs/python/search/query_strings
+https://developers.google.com/appengine/docs/go/search/query_strings
 */
 package search
 
@@ -138,17 +139,38 @@ func validIndexNameOrDocID(s string) bool {
 	return true
 }
 
-var fieldNameRE = regexp.MustCompile(`^[A-Z][A-Za-z0-9_]*$`)
+var (
+	fieldNameRE = regexp.MustCompile(`^[A-Z][A-Za-z0-9_]*$`)
+	languageRE  = regexp.MustCompile(`^[a-z]{2}$`)
+)
 
 // validFieldName is the Go equivalent of Python's _CheckFieldName.
 func validFieldName(s string) bool {
 	return len(s) <= 500 && fieldNameRE.MatchString(s)
 }
 
+// validDocRank checks that the ranks is in the range [0, 2^31).
+func validDocRank(r int) bool {
+	return 0 <= r && r <= (1<<31-1)
+}
+
+// validLanguage checks that a language looks like ISO 639-1.
+func validLanguage(s string) bool {
+	return languageRE.MatchString(s)
+}
+
+// validFloat checks that f is in the range [-2147483647, 2147483647].
+func validFloat(f float64) bool {
+	return -(1<<31-1) <= f && f <= (1<<31-1)
+}
+
 // Index is an index of documents.
 type Index struct {
 	spec pb.IndexSpec
 }
+
+// orderIDEpoch forms the basis for populating OrderId on documents.
+var orderIDEpoch = time.Date(2011, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // Open opens the index with the given name. The index is created if it does
 // not already exist.
@@ -173,15 +195,24 @@ func Open(name string) (*Index, error) {
 // The ID is a human-readable ASCII string. It must contain no whitespace
 // characters and not start with "!".
 //
-// src must be a non-nil struct pointer or implement the FieldLoadSaver
-// interface.
+// src must be a non-nil struct pointer or implement the FieldLoadSaver or
+// FieldMetadataLoadSaver interface.
 func (x *Index) Put(c appengine.Context, id string, src interface{}) (string, error) {
-	fields, err := saveFields(src)
+	fields, meta, err := saveDoc(src)
 	if err != nil {
 		return "", err
 	}
 	d := &pb.Document{
-		Field: fields,
+		Field:   fields,
+		OrderId: proto.Int32(int32(time.Since(orderIDEpoch).Seconds())),
+	}
+	if meta != nil {
+		if meta.Rank != 0 {
+			if !validDocRank(meta.Rank) {
+				return "", fmt.Errorf("search: invalid rank %d, must be [0, 2^31)", meta.Rank)
+			}
+			*d.OrderId = int32(meta.Rank)
+		}
 	}
 	if id != "" {
 		if !validIndexNameOrDocID(id) {
@@ -199,12 +230,14 @@ func (x *Index) Put(c appengine.Context, id string, src interface{}) (string, er
 	if err := c.Call("search", "IndexDocument", req, res, nil); err != nil {
 		return "", err
 	}
+	if len(res.Status) > 0 {
+		if s := res.Status[0]; s.GetCode() != pb.SearchServiceError_OK {
+			return "", fmt.Errorf("search: %s: %s", s.GetCode(), s.GetErrorDetail())
+		}
+	}
 	if len(res.Status) != 1 || len(res.DocId) != 1 {
 		return "", fmt.Errorf("search: internal error: wrong number of results (%d Statuses, %d DocIDs)",
 			len(res.Status), len(res.DocId))
-	}
-	if s := res.Status[0]; s.GetCode() != pb.SearchServiceError_OK {
-		return "", fmt.Errorf("search: %s: %s", s.GetCode(), s.GetErrorDetail())
 	}
 	return res.DocId[0], nil
 }
@@ -214,8 +247,11 @@ func (x *Index) Put(c appengine.Context, id string, src interface{}) (string, er
 // The ID is a human-readable ASCII string. It must be non-empty, contain no
 // whitespace characters and not start with "!".
 //
-// dst must be a non-nil struct pointer or implement the FieldLoadSaver
-// interface.
+// dst must be a non-nil struct pointer or implement the FieldLoadSaver or
+// FieldMetadataLoadSaver interface.
+//
+// If dst is a struct pointer, then fields which are missing or unexported in
+// the destination struct are silently ignored.
 func (x *Index) Get(c appengine.Context, id string, dst interface{}) error {
 	if id == "" || !validIndexNameOrDocID(id) {
 		return fmt.Errorf("search: invalid ID %q", id)
@@ -237,7 +273,10 @@ func (x *Index) Get(c appengine.Context, id string, dst interface{}) error {
 	if len(res.Document) != 1 || res.Document[0].GetId() != id {
 		return ErrNoSuchDocument
 	}
-	return loadFields(dst, res.Document[0].Field)
+	metadata := &DocumentMetadata{
+		Rank: int(res.Document[0].GetOrderId()),
+	}
+	return loadDoc(dst, res.Document[0].Field, metadata)
 }
 
 // Delete deletes a document from the index.
@@ -270,11 +309,14 @@ func (x *Index) List(c appengine.Context, opts *ListOptions) *Iterator {
 		count:         -1,
 		listInclusive: true,
 		more:          moreList,
+		limit:         -1,
 	}
 	if opts != nil {
-		if opts.StartID != "" {
-			t.listStartID = opts.StartID
+		t.listStartID = opts.StartID
+		if opts.Limit > 0 {
+			t.limit = opts.Limit
 		}
+		t.idsOnly = opts.IDsOnly
 	}
 	return t
 }
@@ -288,6 +330,12 @@ func moreList(t *Iterator) error {
 	if t.listStartID != "" {
 		req.Params.StartDocId = &t.listStartID
 		req.Params.IncludeStartDoc = &t.listInclusive
+	}
+	if t.limit > 0 {
+		req.Params.Limit = proto.Int32(int32(t.limit))
+	}
+	if t.idsOnly {
+		req.Params.KeysOnly = &t.idsOnly
 	}
 
 	res := &pb.ListDocumentsResponse{}
@@ -314,17 +362,32 @@ type ListOptions struct {
 	// documents. The zero value means all documents will be returned.
 	StartID string
 
-	// TODO: limit, idsOnly, maybe others.
+	// Limit is the maximum number of documents to return. The zero value
+	// indicates no limit.
+	Limit int
+
+	// IDsOnly indicates that only document IDs should be returned for the list
+	// operation; no document fields are populated.
+	IDsOnly bool
 }
 
 // Search searches the index for the given query.
 func (x *Index) Search(c appengine.Context, query string, opts *SearchOptions) *Iterator {
-	return &Iterator{
+	t := &Iterator{
 		c:           c,
 		index:       x,
 		searchQuery: query,
 		more:        moreSearch,
+		limit:       -1,
 	}
+	if opts != nil {
+		if opts.Limit > 0 {
+			t.limit = opts.Limit
+		}
+		t.idsOnly = opts.IDsOnly
+		t.sort = opts.Sort
+	}
+	return t
 }
 
 func moreSearch(t *Iterator) error {
@@ -335,6 +398,18 @@ func moreSearch(t *Iterator) error {
 			CursorType: pb.SearchParams_SINGLE.Enum(),
 		},
 	}
+	if t.limit > 0 {
+		req.Params.Limit = proto.Int32(int32(t.limit))
+	}
+	if t.idsOnly {
+		req.Params.KeysOnly = &t.idsOnly
+	}
+	if t.sort != nil {
+		if err := sortToProto(t.sort, req.Params); err != nil {
+			return err
+		}
+	}
+
 	if t.searchCursor != nil {
 		req.Params.Cursor = t.searchCursor
 	}
@@ -357,10 +432,110 @@ func moreSearch(t *Iterator) error {
 
 // SearchOptions are the options for searching an index. Passing a nil
 // *SearchOptions is equivalent to using the default values.
-//
-// There are currently no options. Future versions may introduce some.
 type SearchOptions struct {
-	// TODO: limit, cursor, offset, idsOnly, maybe others.
+	// Limit is the maximum number of documents to return. The zero value
+	// indicates no limit.
+	Limit int
+
+	// IDsOnly indicates that only document IDs should be returned for the search
+	// operation; no document fields are populated.
+	IDsOnly bool
+
+	// Sort controls the ordering of search results.
+	Sort *SortOptions
+
+	// TODO: cursor, offset, maybe others.
+}
+
+// SortOptions control the ordering and scoring of search results.
+type SortOptions struct {
+	// Expressions is a slice of expressions representing a multi-dimensional
+	// sort.
+	Expressions []SortExpression
+
+	// Scorer, when specified, will cause the documents to be scored according to
+	// search term frequency.
+	Scorer Scorer
+
+	// Limit is the maximum number of objects to score and/or sort. Limit cannot
+	// be more than 10,000. The zero value indicates a default limit.
+	Limit int
+}
+
+// SortExpression defines a single dimension for sorting a document.
+type SortExpression struct {
+	// Expr is evaluated to providing a sorting value for each document.
+	// See https://developers.google.com/appengine/docs/go/search/options for
+	// the supported expression syntax.
+	Expr string
+
+	// Reverse causes the documents to be sorted in ascending order.
+	Reverse bool
+
+	// The default value to use when no field is present or the expresion
+	// cannot be calculated for a document. For text sorts, Default must
+	// be of type string; for numeric sorts, float64.
+	Default interface{}
+}
+
+// A Scorer defines how a document is scored.
+type Scorer interface {
+	toProto(*pb.ScorerSpec)
+}
+
+type enumScorer struct {
+	enum pb.ScorerSpec_Scorer
+}
+
+func (e enumScorer) toProto(spec *pb.ScorerSpec) {
+	spec.Scorer = e.enum.Enum()
+}
+
+var (
+	// MatchScorer assigns a score based on term frequency in a document.
+	MatchScorer Scorer = enumScorer{pb.ScorerSpec_MATCH_SCORER}
+
+	// RescoringMatchScorer assigns a score based on the quality of the query
+	// match. It is similar to a MatchScorer but uses a more complex scoring
+	// algorithm based on match term frequency and other factors like field type.
+	// Please be aware that this algorithm is continually refined and can change
+	// over time without notice. This means that the ordering of search results
+	// that use this scorer can also change without notice.
+	RescoringMatchScorer Scorer = enumScorer{pb.ScorerSpec_RESCORING_MATCH_SCORER}
+)
+
+func sortToProto(sort *SortOptions, params *pb.SearchParams) error {
+	for _, e := range sort.Expressions {
+		spec := &pb.SortSpec{
+			SortExpression: proto.String(e.Expr),
+		}
+		if e.Reverse {
+			spec.SortDescending = proto.Bool(false)
+		}
+		if e.Default != nil {
+			switch d := e.Default.(type) {
+			case float64:
+				spec.DefaultValueNumeric = &d
+			case string:
+				spec.DefaultValueText = &d
+			default:
+				return fmt.Errorf("search: invalid Default type %T for expression %q", d, e.Expr)
+			}
+		}
+		params.SortSpec = append(params.SortSpec, spec)
+	}
+
+	spec := &pb.ScorerSpec{}
+	if sort.Limit > 0 {
+		spec.Limit = proto.Int32(int32(sort.Limit))
+		params.ScorerSpec = spec
+	}
+	if sort.Scorer != nil {
+		sort.Scorer.toProto(spec)
+		params.ScorerSpec = spec
+	}
+
+	return nil
 }
 
 // Iterator is the result of searching an index for a query or listing an
@@ -377,10 +552,13 @@ type Iterator struct {
 	searchRes    []*pb.SearchResult
 	searchQuery  string
 	searchCursor *string
+	sort         *SortOptions
 
 	more func(*Iterator) error
 
-	count int
+	count   int
+	limit   int // items left to return; -1 for unlimited.
+	idsOnly bool
 }
 
 // Done is returned when a query iteration has completed.
@@ -393,9 +571,10 @@ func (t *Iterator) Count() int { return t.count }
 // Next returns the ID of the next result. When there are no more results,
 // Done is returned as the error.
 //
-// dst must be a non-nil struct pointer, implement the FieldLoadSaver
-// interface, or be a nil interface value. If a non-nil dst is provided, it
-// will be filled with the indexed fields.
+// dst must be a non-nil struct pointer, implement the FieldLoadSaver or
+// FieldMetadataLoadSaver interface, or be a nil interface value. If a non-nil
+// dst is provided, it will be filled with the indexed fields. dst is ignored
+// if this iterator was created with an IDsOnly option.
 func (t *Iterator) Next(dst interface{}) (string, error) {
 	if t.err == nil && len(t.listRes)+len(t.searchRes) == 0 && t.more != nil {
 		t.err = t.more(t)
@@ -418,27 +597,42 @@ func (t *Iterator) Next(dst interface{}) (string, error) {
 	if doc == nil {
 		return "", errors.New("search: internal error: no document returned")
 	}
-	if dst != nil {
-		if err := loadFields(dst, doc.Field); err != nil {
+	if !t.idsOnly && dst != nil {
+		metadata := &DocumentMetadata{
+			Rank: int(doc.GetOrderId()),
+		}
+		if err := loadDoc(dst, doc.Field, metadata); err != nil {
 			return "", err
+		}
+	}
+	if t.limit > 0 {
+		t.limit--
+		if t.limit == 0 {
+			t.more = nil // prevent further fetches
 		}
 	}
 	return doc.GetId(), nil
 }
 
-// saveFields converts from a struct pointer or FieldLoadSaver to protobufs.
-func saveFields(src interface{}) ([]*pb.Field, error) {
+// saveDoc converts from a struct pointer or
+// FieldLoadSaver/FieldMetadataLoadSaver to protobufs and metadata.
+func saveDoc(src interface{}) ([]*pb.Field, *DocumentMetadata, error) {
 	var err error
 	var fields []Field
-	if x, ok := src.(FieldLoadSaver); ok {
+	var meta *DocumentMetadata
+	switch x := src.(type) {
+	case FieldMetadataLoadSaver:
+		fields, meta, err = x.Save()
+	case FieldLoadSaver:
 		fields, err = x.Save()
-	} else {
+	default:
 		fields, err = SaveStruct(src)
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return fieldsToProto(fields)
+	f, err := fieldsToProto(fields)
+	return f, meta, err
 }
 
 func fieldsToProto(src []Field) ([]*pb.Field, error) {
@@ -471,6 +665,9 @@ func fieldsToProto(src []Field) ([]*pb.Field, error) {
 			if numericFields[f.Name] {
 				return nil, fmt.Errorf("search: duplicate numeric field %q", f.Name)
 			}
+			if !validFloat(x) {
+				return nil, fmt.Errorf("search: numeric field %q with invalid value %f", f.Name, x)
+			}
 			numericFields[f.Name] = true
 			fieldValue.Type = pb.FieldValue_NUMBER.Enum()
 			fieldValue.StringValue = proto.String(strconv.FormatFloat(x, 'e', -1, 64))
@@ -488,6 +685,17 @@ func fieldsToProto(src []Field) ([]*pb.Field, error) {
 		default:
 			return nil, fmt.Errorf("search: unsupported field type: %v", reflect.TypeOf(f.Value))
 		}
+		if f.Language != "" {
+			switch f.Value.(type) {
+			case string, HTML:
+				if !validLanguage(f.Language) {
+					return nil, fmt.Errorf("search: invalid language for field %q: %q", f.Name, f.Language)
+				}
+				fieldValue.Language = &f.Language
+			default:
+				return nil, fmt.Errorf("search: setting language not supported for field %q of type %T", f.Name, f.Value)
+			}
+		}
 		if p := fieldValue.StringValue; p != nil && !utf8.ValidString(*p) {
 			return nil, fmt.Errorf("search: %q field is invalid UTF-8: %q", f.Name, *p)
 		}
@@ -499,16 +707,21 @@ func fieldsToProto(src []Field) ([]*pb.Field, error) {
 	return dst, nil
 }
 
-// loadFields converts from protobufs to a struct pointer or FieldLoadSaver.
-func loadFields(dst interface{}, src []*pb.Field) (err error) {
+// loadDoc converts from protobufs and document metadata to a struct pointer
+// or FieldLoadSaver/FieldMetadataLoadSaver.
+func loadDoc(dst interface{}, src []*pb.Field, meta *DocumentMetadata) (err error) {
 	fields, err := protoToFields(src)
 	if err != nil {
 		return err
 	}
-	if x, ok := dst.(FieldLoadSaver); ok {
+	switch x := dst.(type) {
+	case FieldMetadataLoadSaver:
+		return x.Load(fields, meta)
+	case FieldLoadSaver:
 		return x.Load(fields)
+	default:
+		return LoadStruct(dst, fields)
 	}
-	return LoadStruct(dst, fields)
 }
 
 func protoToFields(fields []*pb.Field) ([]Field, error) {
@@ -521,10 +734,12 @@ func protoToFields(fields []*pb.Field) ([]Field, error) {
 		switch fieldValue.GetType() {
 		case pb.FieldValue_TEXT:
 			f.Value = fieldValue.GetStringValue()
+			f.Language = fieldValue.GetLanguage()
 		case pb.FieldValue_ATOM:
 			f.Value = Atom(fieldValue.GetStringValue())
 		case pb.FieldValue_HTML:
 			f.Value = HTML(fieldValue.GetStringValue())
+			f.Language = fieldValue.GetLanguage()
 		case pb.FieldValue_DATE:
 			sv := fieldValue.GetStringValue()
 			millis, err := strconv.ParseInt(sv, 10, 64)

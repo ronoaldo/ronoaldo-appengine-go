@@ -60,12 +60,19 @@ func valueToProto(defaultAppID, name string, v reflect.Value, multiple bool) (p 
 			unsupported = true
 		}
 	case reflect.Struct:
-		if t, ok := v.Interface().(time.Time); ok {
+		switch t := v.Interface().(type) {
+		case time.Time:
 			if t.Before(minTime) || t.After(maxTime) {
 				return nil, "time value out of range"
 			}
 			pv.Int64Value = proto.Int64(toUnixMicro(t))
-		} else {
+		case appengine.GeoPoint:
+			if !t.Valid() {
+				return nil, "invalid GeoPoint value"
+			}
+			// NOTE: Strangely, latitude maps to X, longitude to Y.
+			pv.Pointvalue = &pb.PropertyValue_PointValue{X: &t.Lat, Y: &t.Lng}
+		default:
 			unsupported = true
 		}
 	case reflect.Slice:
@@ -91,10 +98,14 @@ func valueToProto(defaultAppID, name string, v reflect.Value, multiple bool) (p 
 		switch v.Interface().(type) {
 		case []byte:
 			p.Meaning = pb.Property_BLOB.Enum()
+		case ByteString:
+			p.Meaning = pb.Property_BYTESTRING.Enum()
 		case appengine.BlobKey:
 			p.Meaning = pb.Property_BLOBKEY.Enum()
 		case time.Time:
 			p.Meaning = pb.Property_GD_WHEN.Enum()
+		case appengine.GeoPoint:
+			p.Meaning = pb.Property_GEORSS_POINT.Enum()
 		}
 	}
 	return p, ""
@@ -134,8 +145,9 @@ func saveStructProperty(c chan<- Property, name string, noIndex, multiple bool, 
 		p.Value = x
 	case appengine.BlobKey:
 		p.Value = x
-	case []byte:
-		p.NoIndex = true
+	case appengine.GeoPoint:
+		p.Value = x
+	case ByteString:
 		p.Value = x
 	default:
 		switch v.Kind() {
@@ -147,6 +159,11 @@ func saveStructProperty(c chan<- Property, name string, noIndex, multiple bool, 
 			p.Value = v.String()
 		case reflect.Float32, reflect.Float64:
 			p.Value = v.Float()
+		case reflect.Slice:
+			if v.Type().Elem().Kind() == reflect.Uint8 {
+				p.NoIndex = true
+				p.Value = v.Bytes()
+			}
 		case reflect.Struct:
 			if !v.CanAddr() {
 				return fmt.Errorf("datastore: unsupported struct field: value is unaddressable")
@@ -185,7 +202,7 @@ func (s structPLS) save(c chan<- Property, prefix string, noIndex, multiple bool
 		}
 		noIndex1 := noIndex || t.noIndex
 		// For slice fields that aren't []byte, save each element.
-		if v.Kind() == reflect.Slice && v.Type() != typeOfByteSlice {
+		if v.Kind() == reflect.Slice && v.Type().Elem().Kind() != reflect.Uint8 {
 			for j := 0; j < v.Len(); j++ {
 				if err := saveStructProperty(c, name, noIndex1, true, v.Index(j)); err != nil {
 					return err
@@ -256,12 +273,22 @@ func propertiesToProto(defaultAppID string, key *Key, src <-chan Property) (*pb.
 		case appengine.BlobKey:
 			x.Value.StringValue = proto.String(string(v))
 			x.Meaning = pb.Property_BLOBKEY.Enum()
+		case appengine.GeoPoint:
+			if !v.Valid() {
+				return nil, fmt.Errorf("datastore: invalid GeoPoint value")
+			}
+			// NOTE: Strangely, latitude maps to X, longitude to Y.
+			x.Value.Pointvalue = &pb.PropertyValue_PointValue{X: &v.Lat, Y: &v.Lng}
+			x.Meaning = pb.Property_GEORSS_POINT.Enum()
 		case []byte:
 			x.Value.StringValue = proto.String(string(v))
 			x.Meaning = pb.Property_BLOB.Enum()
 			if !p.NoIndex {
 				return nil, fmt.Errorf("datastore: cannot index a []byte valued Property with Name %q", p.Name)
 			}
+		case ByteString:
+			x.Value.StringValue = proto.String(string(v))
+			x.Meaning = pb.Property_BYTESTRING.Enum()
 		default:
 			if p.Value != nil {
 				return nil, fmt.Errorf("datastore: invalid Value type for a Property with Name %q", p.Name)

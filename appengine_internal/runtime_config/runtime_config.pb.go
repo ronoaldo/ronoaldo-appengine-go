@@ -11,10 +11,12 @@ It has these top-level messages:
 	Config
 	PhpConfig
 	PythonConfig
+	JavaConfig
 	CloudSQL
 	Library
 	Environ
 	VMConfig
+	DartConfig
 */
 package appengine_tools_devappserver2
 
@@ -37,6 +39,7 @@ type Config struct {
 	StaticFiles      *string       `protobuf:"bytes,8,opt,name=static_files,def=^$" json:"static_files,omitempty"`
 	PythonConfig     *PythonConfig `protobuf:"bytes,14,opt,name=python_config" json:"python_config,omitempty"`
 	PhpConfig        *PhpConfig    `protobuf:"bytes,9,opt,name=php_config" json:"php_config,omitempty"`
+	JavaConfig       *JavaConfig   `protobuf:"bytes,21,opt,name=java_config" json:"java_config,omitempty"`
 	Environ          []*Environ    `protobuf:"bytes,10,rep,name=environ" json:"environ,omitempty"`
 	CloudSqlConfig   *CloudSQL     `protobuf:"bytes,11,opt,name=cloud_sql_config" json:"cloud_sql_config,omitempty"`
 	Datacenter       *string       `protobuf:"bytes,12,req,name=datacenter" json:"datacenter,omitempty"`
@@ -45,6 +48,7 @@ type Config struct {
 	AuthDomain       *string       `protobuf:"bytes,16,req,name=auth_domain" json:"auth_domain,omitempty"`
 	MaxInstances     *int32        `protobuf:"varint,18,opt,name=max_instances" json:"max_instances,omitempty"`
 	VmConfig         *VMConfig     `protobuf:"bytes,19,opt,name=vm_config" json:"vm_config,omitempty"`
+	ServerPort       *int32        `protobuf:"varint,20,opt,name=server_port" json:"server_port,omitempty"`
 	XXX_unrecognized []byte        `json:"-"`
 }
 
@@ -135,6 +139,13 @@ func (m *Config) GetPhpConfig() *PhpConfig {
 	return nil
 }
 
+func (m *Config) GetJavaConfig() *JavaConfig {
+	if m != nil {
+		return m.JavaConfig
+	}
+	return nil
+}
+
 func (m *Config) GetEnviron() []*Environ {
 	if m != nil {
 		return m.Environ
@@ -191,6 +202,13 @@ func (m *Config) GetVmConfig() *VMConfig {
 	return nil
 }
 
+func (m *Config) GetServerPort() int32 {
+	if m != nil && m.ServerPort != nil {
+		return *m.ServerPort
+	}
+	return 0
+}
+
 type PhpConfig struct {
 	PhpExecutablePath []byte `protobuf:"bytes,1,opt,name=php_executable_path" json:"php_executable_path,omitempty"`
 	EnableDebugger    *bool  `protobuf:"varint,3,req,name=enable_debugger" json:"enable_debugger,omitempty"`
@@ -237,6 +255,22 @@ func (m *PythonConfig) GetStartupArgs() string {
 		return *m.StartupArgs
 	}
 	return ""
+}
+
+type JavaConfig struct {
+	JvmArgs          []string `protobuf:"bytes,1,rep,name=jvm_args" json:"jvm_args,omitempty"`
+	XXX_unrecognized []byte   `json:"-"`
+}
+
+func (m *JavaConfig) Reset()         { *m = JavaConfig{} }
+func (m *JavaConfig) String() string { return proto.CompactTextString(m) }
+func (*JavaConfig) ProtoMessage()    {}
+
+func (m *JavaConfig) GetJvmArgs() []string {
+	if m != nil {
+		return m.JvmArgs
+	}
+	return nil
 }
 
 type CloudSQL struct {
@@ -336,8 +370,9 @@ func (m *Environ) GetValue() []byte {
 }
 
 type VMConfig struct {
-	DockerDaemonUrl  *string `protobuf:"bytes,1,opt,name=docker_daemon_url" json:"docker_daemon_url,omitempty"`
-	XXX_unrecognized []byte  `json:"-"`
+	DockerDaemonUrl  *string     `protobuf:"bytes,1,opt,name=docker_daemon_url" json:"docker_daemon_url,omitempty"`
+	DartConfig       *DartConfig `protobuf:"bytes,2,opt,name=dart_config" json:"dart_config,omitempty"`
+	XXX_unrecognized []byte      `json:"-"`
 }
 
 func (m *VMConfig) Reset()         { *m = VMConfig{} }
@@ -349,6 +384,53 @@ func (m *VMConfig) GetDockerDaemonUrl() string {
 		return *m.DockerDaemonUrl
 	}
 	return ""
+}
+
+func (m *VMConfig) GetDartConfig() *DartConfig {
+	if m != nil {
+		return m.DartConfig
+	}
+	return nil
+}
+
+type DartConfig struct {
+	DartSdk          *string `protobuf:"bytes,1,opt,name=dart_sdk" json:"dart_sdk,omitempty"`
+	DartDevMode      *string `protobuf:"bytes,2,opt,name=dart_dev_mode" json:"dart_dev_mode,omitempty"`
+	DartPubServeHost *string `protobuf:"bytes,3,opt,name=dart_pub_serve_host" json:"dart_pub_serve_host,omitempty"`
+	DartPubServePort *int32  `protobuf:"varint,4,opt,name=dart_pub_serve_port" json:"dart_pub_serve_port,omitempty"`
+	XXX_unrecognized []byte  `json:"-"`
+}
+
+func (m *DartConfig) Reset()         { *m = DartConfig{} }
+func (m *DartConfig) String() string { return proto.CompactTextString(m) }
+func (*DartConfig) ProtoMessage()    {}
+
+func (m *DartConfig) GetDartSdk() string {
+	if m != nil && m.DartSdk != nil {
+		return *m.DartSdk
+	}
+	return ""
+}
+
+func (m *DartConfig) GetDartDevMode() string {
+	if m != nil && m.DartDevMode != nil {
+		return *m.DartDevMode
+	}
+	return ""
+}
+
+func (m *DartConfig) GetDartPubServeHost() string {
+	if m != nil && m.DartPubServeHost != nil {
+		return *m.DartPubServeHost
+	}
+	return ""
+}
+
+func (m *DartConfig) GetDartPubServePort() int32 {
+	if m != nil && m.DartPubServePort != nil {
+		return *m.DartPubServePort
+	}
+	return 0
 }
 
 func init() {
