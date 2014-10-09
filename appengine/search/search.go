@@ -101,9 +101,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"code.google.com/p/goprotobuf/proto"
+
 	"appengine"
 	"appengine_internal"
-	"code.google.com/p/goprotobuf/proto"
 
 	pb "appengine_internal/search"
 )
@@ -386,6 +387,10 @@ func (x *Index) Search(c appengine.Context, query string, opts *SearchOptions) *
 		}
 		t.idsOnly = opts.IDsOnly
 		t.sort = opts.Sort
+		if opts.Cursor != "" {
+			t.searchCursor = new(string)
+			*t.searchCursor = opts.Cursor
+		}
 	}
 	return t
 }
@@ -444,7 +449,10 @@ type SearchOptions struct {
 	// Sort controls the ordering of search results.
 	Sort *SortOptions
 
-	// TODO: cursor, offset, maybe others.
+	// Cursor continues the query from a previous result.
+	Cursor string
+
+	// TODO: offset, maybe others.
 }
 
 // SortOptions control the ordering and scoring of search results.
@@ -612,6 +620,13 @@ func (t *Iterator) Next(dst interface{}) (string, error) {
 		}
 	}
 	return doc.GetId(), nil
+}
+
+func (t *Iterator) Cursor() string {
+	if t.searchCursor == nil {
+		return ""
+	}
+	return *t.searchCursor
 }
 
 // saveDoc converts from a struct pointer or
