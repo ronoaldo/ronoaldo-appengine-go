@@ -388,6 +388,10 @@ func (x *Index) Search(c appengine.Context, query string, opts *SearchOptions) *
 		t.idsOnly = opts.IDsOnly
 		t.sort = opts.Sort
 		t.exprs = opts.Expressions
+		if opts.Cursor != "" {
+			t.searchCursor = new(string)
+			*t.searchCursor = opts.Cursor
+		}
 	}
 	return t
 }
@@ -464,6 +468,7 @@ type SearchOptions struct {
 	Expressions []FieldExpression
 
 	// TODO: cursor, offset, maybe others.
+  Cursor string
 }
 
 // FieldExpression defines a custom expression to evaluate for each result.
@@ -647,6 +652,13 @@ func (t *Iterator) Next(dst interface{}) (string, error) {
 		}
 	}
 	return doc.GetId(), nil
+}
+
+func (t *Iterator) Cursor() string {
+	if t.searchCursor == nil {
+		return ""
+	}
+	return *t.searchCursor
 }
 
 // saveDoc converts from a struct pointer or
